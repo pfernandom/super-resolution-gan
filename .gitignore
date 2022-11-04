@@ -3,4 +3,5 @@
 *.jpeg
 *.jpg
 *.zip
-*_checkpoints
+/logs
+.ipynb_checkpoints/
