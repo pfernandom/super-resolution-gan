@@ -64,24 +64,30 @@ class NoiseUtil:
         w = shp[2]
         c = shp[3]
 
-        mask = tf.reshape(tf.range(h*w*c), (h,w,c))
-
         random.seed(time.time())
         i = random.randint(0,h-patch_size)
         j = random.randint(0,w-patch_size)
         
-        a = tf.math.logical_and(mask / h <= j+patch_size, mask % w <= i+patch_size)
-        b = tf.math.logical_and(mask / h > j, mask % w > i)
-        d = tf.math.logical_and(a,b)
+       
+        ch1 = tf.stack([tf.range(w)]*h)
+        mask = tf.stack([ch1]*c)
+        mask = tf.transpose(mask, [1,2,0])
+        mask += 1
 
-        for i in range(filter_size-1):
+        random.seed(time.time())
+        d = None
+        for i in range(filter_size):
             i = random.randint(0,h-patch_size)
             j = random.randint(0,w-patch_size)
 
-            a = tf.math.logical_and(mask / h <= j+patch_size, mask % w <= i+patch_size)
-            b = tf.math.logical_and(mask / h > j, mask % w > i)
+            a = tf.math.logical_and(mask <= j+patch_size, tf.transpose(mask, [1,0,2]) <= i+patch_size)
+            b = tf.math.logical_and(tf.transpose(mask, [1,0,2]) > i, mask > j)
             c = tf.math.logical_and(a,b)
-            d = tf.math.logical_or(d,c)
+            if d == None:
+                d = c
+            else:
+                d = tf.math.logical_or(c,d)
+
 
         img3 = tf.where(d, tf.zeros_like(img2), img2)
         trans_img3 = tf.where(d, tf.zeros_like(img2_filtered), img2_filtered)
@@ -91,19 +97,18 @@ class NoiseUtil:
         return img2
 
     @staticmethod
-    def pixel_noise(img, filters, filter_size):
-        return NoiseUtil.random_pixel_noise(img, filters, filter_size, filter_fn=NoiseUtil.filter_pixel(downsize_image_ratios = [1/2]), shape=img.shape)
+    def pixel_noise(img, filters, filter_size, downsize_image_ratios = [1/2]):
+        return NoiseUtil.random_pixel_noise(img, filters, filter_size, filter_fn=NoiseUtil.filter_pixel(downsize_image_ratios = downsize_image_ratios), shape=img.shape)
 
 class ImgUtils():
     @staticmethod
     def normalize(image, as_probs=False):
-        a = (tf.cast(image, tf.float32) - 127.5) if not as_probs else tf.cast(image, tf.float32)
-        return a / 127.5
+        return tf.cast(image, tf.float32) / 127.5
 
     @staticmethod
-    def denormalize(image, cast=False):
+    def denormalize(image, cast=False, as_probs=False):
         # return image
-        img = tf.cast(image, tf.float32) * 127.5 + 127.5
+        img = tf.cast(image, tf.float32) * 127.5
         img = tf.clip_by_value(img, 0.0, 255.0)
         if cast:
             return tf.cast(img, cast)
@@ -129,6 +134,9 @@ class DataLoader():
     def two_from_generator(fn, shape):
         output_signature=tf.TensorSpec(shape=shape, dtype=tf.float32)
         return tf.data.Dataset.from_generator(fn, output_signature=output_signature).map(lambda x: (x,x))
+    
+    def two_from_dataset(dataset):
+        return dataset.map(lambda x: (x,x))
 
 # class DataManagerBuilder:
 #     def with_train_data(data):
@@ -143,6 +151,9 @@ class DataManager():
     def __init__(self, train_ds, test_ds = None):
         self.train_ds = train_ds
         self.test_ds = test_ds
+        
+    def set_train_examples(self, examples):
+        self.train_examples = examples
 
     def set_test_samples(self, test_samples=25):
         self.test_samples = test_samples
@@ -165,37 +176,69 @@ class DataManager():
         dm.set_transform(transform_fn)
 
         return dm
+    
+    @staticmethod
+    def create_label_from_dataset_with_input_transform(train_ds_in, test_ds, input_shape, transform_fn=lambda x:x, test_samples=50):
+        def normalize_both(x,y):
+            return ImgUtils.normalize(x, as_probs=True), ImgUtils.normalize(y, as_probs=True)
+        
+        train_ds = DataLoader.two_from_dataset(train_ds_in).map(normalize_both)
+        test_ds = DataLoader.two_from_dataset(test_ds).map(normalize_both)
+        train_examples = DataLoader.two_from_dataset(train_ds_in).map(normalize_both)
+
+
+        dm = DataManager(train_ds, test_ds)
+        dm.set_test_samples(test_samples)
+        dm.set_transform(transform_fn)
+        dm.set_train_examples(train_examples)
+
+        return dm
+    
+    def get_training_examples(self, batch_size):
+        return self.train_examples.take(batch_size).batch(batch_size).map(self.transform).cache()
+    
+    def get_test_examples(self, batch_size):
+        return self.test_ds.take(batch_size).batch(batch_size).map(self.transform).cache()
 
     def get_test_data(self, batch_size):
-        return self.test_ds.take(batch_size).batch(batch_size).map(self.transform)
+        return self.test_ds.batch(batch_size).map(self.transform).cache()
 
     def get_training_data(self, batch_size):
-        return self.train_ds.take(batch_size).batch(batch_size).map(self.transform)
+        return self.train_ds.batch(batch_size).map(self.transform)
 
     def print_validation(self, model=lambda x:x, batch_size=5, save=False, path="./"):
         rows = batch_size
         cols = 2
+        def print_ds(dataset, save=False):
+            results = [(model(x), y) for x,y in dataset]
+            plt.ion()
+            plt.show()
+            plt.figure(figsize=(rows * 2, cols * 2))
+            for x,y in results:
+                x = tf.clip_by_value(x, 0.0, 1.0)
+                y = tf.clip_by_value(y, 0.0, 1.0)
+                assert x.shape == y.shape
+                for i in range(x.shape[0]):
+                    im = x[i,:,:,:]
+                    plt.subplot(cols, rows, i+1)
+                    plt.imshow(im)
+                    plt.axis('off')
 
-        results = [(model(x), y) for x,y in self.get_test_data(batch_size)]
-        plt.figure(figsize=(rows * 2, cols * 2))
-        for x,y in results:
-            assert x.shape == y.shape
-            for i in range(x.shape[0]):
-                im = x[i,:,:,:]
-                plt.subplot(cols, rows, i+1)
-                plt.imshow(ImgUtils.denormalize(im, cast=tf.uint8))
-                plt.axis('off')
-           
 
-            for i in range(y.shape[0]):
-                im = y[i,:,:,:]
-                plt.subplot(cols, rows, i+x.shape[0]+1)
-                plt.imshow(ImgUtils.denormalize(im, cast=tf.uint8))
-                plt.axis('off')
-        plt.subplots_adjust(wspace = 0, hspace = 0.5)
-        if save:
-            plt.savefig(path)
-        plt.show()
+                for i in range(y.shape[0]):
+                    im = y[i,:,:,:]
+                    plt.subplot(cols, rows, i+x.shape[0]+1)
+                    plt.imshow(im)
+                    plt.axis('off')
+            plt.subplots_adjust(wspace = 0, hspace = 0.5)
+            if save:
+                plt.savefig(path)
+        
+            plt.draw()
+            plt.pause(0.001)
+            
+        print_ds(self.get_test_examples(batch_size), save=save)
+        print_ds(self.get_training_examples(batch_size), save=False)
            
 # def train_get():
 #    for x, y in zip(x_train, y_train):
