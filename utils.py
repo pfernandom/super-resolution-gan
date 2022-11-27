@@ -103,12 +103,12 @@ class NoiseUtil:
 class ImgUtils():
     @staticmethod
     def normalize(image, as_probs=False):
-        return tf.cast(image, tf.float32) / 127.5
+        return tf.cast(image, tf.float32) / 255.0
 
     @staticmethod
     def denormalize(image, cast=False, as_probs=False):
         # return image
-        img = tf.cast(image, tf.float32) * 127.5
+        img = tf.cast(image, tf.float32) * 255.0
         img = tf.clip_by_value(img, 0.0, 255.0)
         if cast:
             return tf.cast(img, cast)
@@ -178,13 +178,10 @@ class DataManager():
         return dm
     
     @staticmethod
-    def create_label_from_dataset_with_input_transform(train_ds_in, test_ds, input_shape, transform_fn=lambda x:x, test_samples=50):
-        def normalize_both(x,y):
-            return ImgUtils.normalize(x, as_probs=True), ImgUtils.normalize(y, as_probs=True)
-        
-        train_ds = DataLoader.two_from_dataset(train_ds_in).map(normalize_both)
-        test_ds = DataLoader.two_from_dataset(test_ds).map(normalize_both)
-        train_examples = DataLoader.two_from_dataset(train_ds_in).map(normalize_both)
+    def create_label_from_dataset_with_input_transform(train_ds_in, test_ds, input_shape, transform_fn=lambda x:x, test_samples=50, base_transform=lambda y:y):        
+        train_ds = DataLoader.two_from_dataset(train_ds_in.map(base_transform,num_parallel_calls=tf.data.AUTOTUNE))
+        test_ds = DataLoader.two_from_dataset(test_ds)
+        train_examples = DataLoader.two_from_dataset(train_ds_in.map(base_transform,num_parallel_calls=tf.data.AUTOTUNE))
 
 
         dm = DataManager(train_ds, test_ds)
@@ -194,17 +191,24 @@ class DataManager():
 
         return dm
     
+    def normalize_both(self, x,y):
+        return ImgUtils.normalize(x, as_probs=True), ImgUtils.normalize(y, as_probs=True)
+    
     def get_training_examples(self, batch_size):
-        return self.train_examples.take(batch_size).batch(batch_size).map(self.transform).cache()
+        return self.train_examples.take(batch_size).batch(batch_size).map(self.normalize_both, num_parallel_calls=tf.data.AUTOTUNE).map(self.transform,
+                                                                         num_parallel_calls=tf.data.AUTOTUNE).cache()
     
     def get_test_examples(self, batch_size):
-        return self.test_ds.take(batch_size).batch(batch_size).map(self.transform).cache()
+        return self.test_ds.take(batch_size).batch(batch_size).map(self.normalize_both, num_parallel_calls=tf.data.AUTOTUNE).map(self.transform,
+                                                                         num_parallel_calls=tf.data.AUTOTUNE).cache()
 
     def get_test_data(self, batch_size):
-        return self.test_ds.batch(batch_size).map(self.transform).cache()
+        return self.test_ds.batch(batch_size).map(self.normalize_both, num_parallel_calls=tf.data.AUTOTUNE).map(self.transform,
+                                                                         num_parallel_calls=tf.data.AUTOTUNE).cache()
 
     def get_training_data(self, batch_size):
-        return self.train_ds.batch(batch_size).map(self.transform)
+        return self.train_ds.batch(batch_size).map(self.normalize_both, num_parallel_calls=tf.data.AUTOTUNE).map(self.transform,
+                                                                         num_parallel_calls=tf.data.AUTOTUNE)
 
     def print_validation(self, model=lambda x:x, batch_size=5, save=False, path="./"):
         rows = batch_size
@@ -298,10 +302,7 @@ class SSIM_Multiscale(tf.keras.metrics.Metric):
     self.ep = 0.0000001
 
   def update_state(self, y_true, y_pred, sample_weight=None):
-    y_true = ImgUtils.denormalize(y_true, cast=tf.uint8)
-    y_pred = ImgUtils.denormalize(y_pred, cast=tf.uint8)
-    same = tf.math.reduce_sum(tf.image.ssim_multiscale(y_true, y_true, 255.0, filter_size=3)) + self.ep
-    values = (self.ep + tf.math.reduce_sum(tf.image.ssim_multiscale(y_true, y_pred, 255.0, filter_size=4))) / same
+    values = tf.math.reduce_mean(tf.image.ssim_multiscale(y_true, y_pred, 1.0, filter_size=4))
 
     values = tf.cast(values, self.dtype)
     if sample_weight is not None:
@@ -309,7 +310,7 @@ class SSIM_Multiscale(tf.keras.metrics.Metric):
         sample_weight = tf.broadcast_to(sample_weight, values.shape)
         values = tf.multiply(values, sample_weight)
     self.ssim_ms.assign(values)
-    self.self_ssim_ms.assign(same)
+#     self.self_ssim_ms.assign(same)
 
   def result(self):
     return self.ssim_ms
@@ -321,8 +322,7 @@ class TOP_SSIM_Multiscale(tf.keras.metrics.Metric):
     self.self_ssim_ms = self.add_weight(name='self_ssim_ms', initializer='zeros')
 
   def update_state(self, y_true, y_pred, sample_weight=None):
-    y_true = ImgUtils.denormalize(y_true, cast=tf.uint8)
-    values = tf.math.reduce_sum(tf.image.ssim_multiscale(y_true, y_true, 255.0, filter_size=3))
+    values = tf.math.reduce_mean(tf.image.ssim_multiscale(y_true, y_pred, 1.0, filter_size=3))
 
     values = tf.cast(values, self.dtype)
     if sample_weight is not None:
