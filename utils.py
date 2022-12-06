@@ -108,7 +108,7 @@ class ImgUtils():
     @staticmethod
     def denormalize(image, cast=False, as_probs=False):
         # return image
-        img = tf.cast(image, tf.float32) * 255.0
+        img = (tf.cast(image, tf.float32) * 255.0) + 255.0
         img = tf.clip_by_value(img, 0.0, 255.0)
         if cast:
             return tf.cast(img, cast)
