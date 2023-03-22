@@ -1,335 +1,223 @@
-import random
 import tensorflow as tf
-import tensorflow.keras as keras
-import tensorflow as tf
-
-from tensorflow.keras.datasets import mnist
-from tensorflow.keras import layers
-from tensorflow.keras.layers import Dense, Input, Flatten,\
-                                    Reshape, LeakyReLU as LR,\
-                                    Activation, Dropout
-from tensorflow.keras.models import Model, Sequential
 from matplotlib import pyplot as plt
-from IPython import display # If using IPython, Colab or Jupyter
-import numpy as np
-import tensorflow_addons as tfa
+from IPython import display  # If using IPython, Colab or Jupyter
 import datetime
 import random
-import time
+import datetime
 
-class NoiseUtil:
-    @staticmethod
-    def filter_pixel(downsize_image_ratios = [1/16]):
-        def fn(img):
-            downsize_image_ratio = random.choice(downsize_image_ratios)
-            resized_size_h = img.shape[1]
-            resized_size_w = img.shape[2]
-            
-            # noisy = normalize(img) + noise_factor * np.random.normal(loc=0.0, scale=1.0, size=(img.shape))
-            # noisy = layers.MaxPooling2D(pool_size = (8, 8), padding='same')(tf.expand_dims(img, axis=0))
-            down = tf.image.resize(
-                img,
-                [int(resized_size_h * downsize_image_ratio), int(resized_size_w * downsize_image_ratio)],
-                preserve_aspect_ratio=True,
-                antialias=False,
-                name=None)
 
-            up = tf.image.resize(
-                down,
-                [resized_size_h, resized_size_w],
-                preserve_aspect_ratio=True,
-                antialias=False,
-                name=None)
+def now():
+    now = datetime.datetime.now()
+    return now.strftime('%Y_%m_%d_T%H_%M_%S') + ('_%02d' % (now.microsecond / 10000))
 
-            up = tf.cast((up), img.dtype)
-            return up
-        return fn
 
-    @staticmethod
-    def random_pixel_noise(img2, filter_size, patch_size, filter_fn, shape):
-        
-        if filter_size == 0:
-            return img2
-        
-        if (len(tf.shape(img2)) < 4):
-            img2 = tf.convert_to_tensor(img2[:,:,:])
-            img2 = tf.expand_dims(img2, axis=0)
+def minute():
+    now = datetime.datetime.now()
+    return now.strftime('%H_%M')
+
+
+class TBUtilCallback(tf.keras.callbacks.Callback):
+    def __init__(self, tb_util):
+        self.tb_util = tb_util
+
+    def on_epoch_end(self, epoch, logs):
+        self.tb_util.log_scalars(logs.items(), step=epoch)
+
+
+class TensorboardUtil():
+    def __init__(self, log_dir):
+        self.log_dir = log_dir
+        t = now()
+        self.train_dir = f"{log_dir}/{t}/train"
+        self.val_dir = f"{log_dir}/{t}/validation"
+        self.file_writer = tf.summary.create_file_writer(self.train_dir)
+        self.val_file_writer = tf.summary.create_file_writer(self.val_dir)
+
+    def log_text(self, data, name, step=0):
+        with self.file_writer.as_default():
+            tf.summary.text(name, data, step=step, description=None)
+
+    def log_scalar(self, value, name, step=0):
+        if "val_" in name:
+            with self.val_file_writer.as_default():
+                tf.summary.scalar(name, value, step=step)
         else:
-            img2 = tf.convert_to_tensor(img2[:,:,:,:])
-  
-        img2_filtered = filter_fn(img2)
-        shp = shape
-        n = shp[0]
-        h = shp[1]
-        w = shp[2]
-        c = shp[3]
+            with self.file_writer.as_default():
+                tf.summary.scalar(name.replace("val_", ""), value, step=step)
 
-        random.seed(time.time())
-        i = random.randint(0,h-patch_size)
-        j = random.randint(0,w-patch_size)
-        
-       
-        ch1 = tf.stack([tf.range(w)]*h)
-        mask = tf.stack([ch1]*c)
-        mask = tf.transpose(mask, [1,2,0])
-        mask += 1
+    def log_scalars(self, names_and_values, step):
+        train_scalars = filter(lambda x: "val_" not in x[0], names_and_values)
+        val_scalars = filter(lambda x: "val_" in x[0], names_and_values)
 
-        random.seed(time.time())
-        d = None
-        for i in range(filter_size):
-            i = random.randint(0,h-patch_size)
-            j = random.randint(0,w-patch_size)
+        with self.file_writer.as_default():
+            for name, value in train_scalars:
+                tf.summary.scalar(name, value, step=step)
 
-            a = tf.math.logical_and(mask <= j+patch_size, tf.transpose(mask, [1,0,2]) <= i+patch_size)
-            b = tf.math.logical_and(tf.transpose(mask, [1,0,2]) > i, mask > j)
-            c = tf.math.logical_and(a,b)
-            if d == None:
-                d = c
-            else:
-                d = tf.math.logical_or(c,d)
+        with self.val_file_writer.as_default():
+            for name, value in val_scalars:
+                tf.summary.scalar(name.replace("val_", ""), value, step=step)
 
+        self.file_writer.flush()
+        self.val_file_writer.flush()
 
-        img3 = tf.where(d, tf.zeros_like(img2), img2)
-        trans_img3 = tf.where(d, tf.zeros_like(img2_filtered), img2_filtered)
-        img4 = img2_filtered * 2
-        img2 = img3 + img2_filtered - trans_img3
-        
-        return img2
+#         hp.KerasCallback(logdir, hparams)
 
-    @staticmethod
-    def pixel_noise(img, filters, filter_size, downsize_image_ratios = [1/2]):
-        return NoiseUtil.random_pixel_noise(img, filters, filter_size, filter_fn=NoiseUtil.filter_pixel(downsize_image_ratios = downsize_image_ratios), shape=img.shape)
+    def save_image(self, image, label, step=0):
+        with self.file_writer.as_default():
+            # print(f"Saved {label} to Tensorboard")
+            tf.summary.image(label, image, step=step)
 
-class ImgUtils():
-    @staticmethod
-    def normalize(image, as_probs=False):
-        return tf.cast(image, tf.float32) / 255.0
-
-    @staticmethod
-    def denormalize(image, cast=False, as_probs=False):
-        # return image
-        img = (tf.cast(image, tf.float32) * 255.0) + 255.0
-        img = tf.clip_by_value(img, 0.0, 255.0)
-        if cast:
-            return tf.cast(img, cast)
-        return img
-
-im = np.random.normal(loc=0.0, scale=1.0, size=(1,28,28,1))
-im = tf.cast(im, tf.float32) * 127.5 + 127.5
-im = tf.clip_by_value(im, 0.0, 255.0)
-
-im_processed = ImgUtils.denormalize(ImgUtils.normalize(im), cast=im.dtype)
-
-assert np.any(im == im_processed)
+    def get_callback(self, profile_batch=0):
+        return TBUtilCallback(self)
+        # return tf.keras.callbacks.TensorBoard(log_dir = self.log_dir,
+        #               write_graph=True,
+        #               histogram_freq = 0,
+        #               profile_batch=profile_batch)
 
 
-class DataLoader():
+class ImageRenderer():
+    def __init__(self, imgs_to_render, max_size=20):
+        self.imgs_to_render = imgs_to_render
+        self.tb_util = None
+        self.save = False
+        self.max_size = max_size
 
-    @staticmethod
-    def one_from_generator(fn, shape):
-        output_signature=tf.TensorSpec(shape=shape, dtype=tf.float32)
-        return tf.data.Dataset.from_generator(fn, output_signature=output_signature)
+    def withTensorboard(self, tensorboard_util, tb_sample=4, tb_batch=4):
+        self.tb_util = tensorboard_util
+        self.tb_batch = tb_batch
+        self.tb_sample = tb_sample
+        return self
 
-    @staticmethod
-    def two_from_generator(fn, shape):
-        output_signature=tf.TensorSpec(shape=shape, dtype=tf.float32)
-        return tf.data.Dataset.from_generator(fn, output_signature=output_signature).map(lambda x: (x,x))
-    
-    def two_from_dataset(dataset):
-        return dataset.map(lambda x: (x,x))
+    def saveImages(self, path):
+        self.save = True
+        self.save_path = path
+        return self
 
-# class DataManagerBuilder:
-#     def with_train_data(data):
-#         self.train_ds = data
-        
-#     def with_test_data(data):
-#         self.test_ds = data
-        
-#     def with_
-    
-class DataManager():
-    def __init__(self, train_ds, test_ds = None):
-        self.train_ds = train_ds
-        self.test_ds = test_ds
-        
-    def set_train_examples(self, examples):
-        self.train_examples = examples
+    def render(self, model, dataset, batch=1):
+        imgs_to_render = self.imgs_to_render
 
-    def set_test_samples(self, test_samples=25):
-        self.test_samples = test_samples
+        img_path = "./prepa/2304.png"
+        raw_png = tf.io.read_file(str(img_path), name=img_path)
+        pimage = tf.expand_dims(tf.image.decode_png(
+            raw_png, channels=3, name=img_path), axis=0)
+        # imgs_to_render.append(pimage, pimage)
+        y_pred = model(pimage, training=False)
+        y_pred = tf.cast(y_pred, tf.uint8)
 
-    def set_transform(self, fn):
-        self.transform = fn
+        fig = plt.figure(figsize=(10, 20))
+        gs = fig.add_gridspec(2, hspace=0)
+        axs = gs.subplots()
 
-    @staticmethod
-    def create_label_with_input_transform(train_generator, test_generator, input_shape, transform_fn=lambda x:x, test_samples=50):
-        def normalize_both(x,y):
-            return ImgUtils.normalize(x, as_probs=True), ImgUtils.normalize(y, as_probs=True)
-        
-        train_ds = DataLoader.two_from_generator(train_generator, input_shape).map(normalize_both).skip(test_samples)
-        test_ds = None
-        if test_generator:
-            test_ds = DataLoader.two_from_generator(test_generator, input_shape).map(normalize_both).take(test_samples)
+        p = axs[0]
+        p.imshow(pimage[0])
+        p.set_title("With noise")
+        p.axis('off')
 
-        dm = DataManager(train_ds, test_ds)
-        dm.set_test_samples(test_samples)
-        dm.set_transform(transform_fn)
+        p = axs[1]
+        p.imshow(y_pred[0])
+        p.set_title("Denoised")
+        p.axis('off')
 
-        return dm
-    
-    @staticmethod
-    def create_label_from_dataset_with_input_transform(train_ds_in, test_ds, input_shape, transform_fn=lambda x:x, test_samples=50, base_transform=lambda y:y):        
-        train_ds = DataLoader.two_from_dataset(train_ds_in.map(base_transform,num_parallel_calls=tf.data.AUTOTUNE))
-        test_ds = DataLoader.two_from_dataset(test_ds)
-        train_examples = DataLoader.two_from_dataset(train_ds_in.map(base_transform,num_parallel_calls=tf.data.AUTOTUNE))
+        if self.tb_util is not None:
+            self.tb_util.save_image(y_pred, f"denoised_prepa", batch)
+            self.tb_util.save_image(pimage, f"noisy_prepa", batch)
 
+        plt.figure()
 
-        dm = DataManager(train_ds, test_ds)
-        dm.set_test_samples(test_samples)
-        dm.set_transform(transform_fn)
-        dm.set_train_examples(train_examples)
+        rows = imgs_to_render
+        cols = 3
+        plt.ion()
+        # plt.show()
+        fig, axs = plt.subplots(rows, cols)
+        fig.subplots_adjust(wspace=0, hspace=0.5)
+        fig.set_size_inches((self.max_size+15) / cols, self.max_size / rows)
 
-        return dm
-    
-    def normalize_both(self, x,y):
-        return ImgUtils.normalize(x, as_probs=True), ImgUtils.normalize(y, as_probs=True)
-    
-    def get_training_examples(self, batch_size):
-        return self.train_examples.take(batch_size).batch(batch_size).map(self.normalize_both, num_parallel_calls=tf.data.AUTOTUNE).map(self.transform,
-                                                                         num_parallel_calls=tf.data.AUTOTUNE).cache()
-    
-    def get_test_examples(self, batch_size):
-        return self.test_ds.take(batch_size).batch(batch_size).map(self.normalize_both, num_parallel_calls=tf.data.AUTOTUNE).map(self.transform,
-                                                                         num_parallel_calls=tf.data.AUTOTUNE).cache()
+        for i, (x, y) in zip(range(imgs_to_render), dataset):
+            y_pred = model(x, training=False)
+            x = tf.cast(x, tf.uint8)
+            y_pred = tf.cast(y_pred, tf.uint8)
+            y = tf.cast(y, tf.uint8)
 
-    def get_test_data(self, batch_size):
-        return self.test_ds.batch(batch_size).map(self.normalize_both, num_parallel_calls=tf.data.AUTOTUNE).map(self.transform,
-                                                                         num_parallel_calls=tf.data.AUTOTUNE).cache()
+            if self.tb_util is not None:
+                self.tb_util.save_image(y_pred, f"denoised", batch)
+                self.tb_util.save_image(x, f"noisy", batch)
+                self.tb_util.save_image(y, f"original", batch)
 
-    def get_training_data(self, batch_size):
-        return self.train_ds.batch(batch_size).map(self.normalize_both, num_parallel_calls=tf.data.AUTOTUNE).map(self.transform,
-                                                                         num_parallel_calls=tf.data.AUTOTUNE)
+            plt.subplot(cols, rows, i+1)
+            p = axs[i, 0]
+            p.imshow(x[0])
+            p.set_title("With noise")
+            p.axis('off')
 
-    def print_validation(self, model=lambda x:x, batch_size=5, save=False, path="./"):
-        rows = batch_size
-        cols = 2
-        def print_ds(dataset, save=False):
-            results = [(model(x), y) for x,y in dataset]
-            plt.ion()
-            plt.show()
-            plt.figure(figsize=(rows * 2, cols * 2))
-            for x,y in results:
-                x = tf.clip_by_value(x, 0.0, 1.0)
-                y = tf.clip_by_value(y, 0.0, 1.0)
-                assert x.shape == y.shape
-                for i in range(x.shape[0]):
-                    im = x[i,:,:,:]
-                    plt.subplot(cols, rows, i+1)
-                    plt.imshow(im)
-                    plt.axis('off')
+            p = axs[i, 1]
+            p.imshow(y_pred[0])
+            p.set_title("Denoised")
+            p.axis('off')
+
+            p = axs[i, 2]
+            p.imshow(y[0])
+            p.set_title("Original")
+            p.axis('off')
+
+        plt.draw()
+        plt.pause(0.001)
 
 
-                for i in range(y.shape[0]):
-                    im = y[i,:,:,:]
-                    plt.subplot(cols, rows, i+x.shape[0]+1)
-                    plt.imshow(im)
-                    plt.axis('off')
-            plt.subplots_adjust(wspace = 0, hspace = 0.5)
-            if save:
-                plt.savefig(path)
-        
-            plt.draw()
-            plt.pause(0.001)
-            
-        print_ds(self.get_test_examples(batch_size), save=save)
-        print_ds(self.get_training_examples(batch_size), save=False)
-           
-# def train_get():
-#    for x, y in zip(x_train, y_train):
-#         x = tf.expand_dims(x, axis=2)
-#         yield x
-
-# def test_get():
-#    for x in x_test:
-#         x = tf.expand_dims(x, axis=2)
-#         yield x
+'''
+Gradient accumulator
+'''
 
 
-# def add_noise(x,y):
-#     n = NoiseUtil.pixel_noise(x, 25, 5)
+class CustomTrainStep(tf.keras.Model):
+    def __init__(self, n_gradients, autoencoder, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.autoencoder = autoencoder
+        print(f"CustomTrainStep: n_gradients = {n_gradients}")
+        self.n_gradients = tf.Variable(
+            n_gradients, dtype=tf.int32, trainable=False)
+        self.n_acum_step = tf.Variable(0, dtype=tf.int32, trainable=False)
+        self.update_count = tf.Variable(0, dtype=tf.int32, trainable=False)
+        self.gradient_accumulation = [tf.Variable(tf.zeros_like(v, dtype=tf.float32),
+                                                  trainable=False) for v in self.trainable_variables]
 
-# #     n = x + 0.4 * tf.random.normal(
-# #         x.shape[1:],
-# #         mean=0.0,
-# #         stddev=1.0,
-# #         dtype=tf.dtypes.float32,
-# #     )
+    def call(self, data):
+        return self.autoencoder(data, training=False)
 
-#     return n,y
-# dm = DataManager.create_label_with_input_transform(train_get, test_get, (28,28,1), add_noise)
-# dm.print_validation() 
+    def train_step(self, data):
+        self.n_acum_step.assign_add(1)
 
+        x, y = data
+        # Gradient Tape
+        with tf.GradientTape() as tape:
+            y_pred = self.autoencoder(x, training=True)
+            loss = self.compiled_loss(
+                y, y_pred, regularization_losses=self.losses)
+            scaled_loss = self.optimizer.get_scaled_loss(loss)
 
-class SSIM(tf.keras.metrics.Metric):
+        # Calculate batch gradients
+        scaled_grads = tape.gradient(
+            scaled_loss, self.autoencoder.trainable_variables)
+        gradients = self.optimizer.get_unscaled_gradients(scaled_grads)
+        # Accumulate batch gradients
+        for i in range(len(self.gradient_accumulation)):
+            self.gradient_accumulation[i].assign_add(gradients[i])
 
-  def __init__(self, name='ssim', **kwargs):
-    super(SSIM, self).__init__(name=name, **kwargs)
-    self.ssim = self.add_weight(name='ssim', initializer='zeros')
-    self.ep = 0.0000001
+        # If n_acum_step reach the n_gradients then we apply accumulated gradients to update the variables otherwise do nothing
+        tf.cond(tf.equal(self.n_acum_step, self.n_gradients),
+                self.apply_accu_gradients, lambda: None)
 
-  def update_state(self, y_true, y_pred, sample_weight=None):
-    y_true = ImgUtils.denormalize(y_true, cast=tf.uint8)
-    y_pred = ImgUtils.denormalize(y_pred, cast=tf.uint8)
-    same = tf.math.reduce_sum(tf.image.ssim(y_true, y_true, 255.0, filter_size=3)) + self.ep
-    values = (self.ep + tf.math.reduce_sum(tf.image.ssim(y_true, y_pred, 255.0, filter_size=3))) / same
-    
-    values = tf.cast(values, self.dtype)
-    if sample_weight is not None:
-        sample_weight = tf.cast(sample_weight, self.dtype)
-        sample_weight = tf.broadcast_to(sample_weight, values.shape)
-        values = tf.multiply(values, sample_weight)
-    self.ssim.assign(tf.reduce_sum(values))
+        # update metrics
+        self.compiled_metrics.update_state(y, y_pred)
+        return {m.name: m.result() for m in self.metrics}
 
-  def result(self):
-    return self.ssim
+    def apply_accu_gradients(self):
+        # apply accumulated gradients
+        self.optimizer.apply_gradients(
+            zip(self.gradient_accumulation, self.autoencoder.trainable_variables))
+        self.update_count.assign_add(1)
 
-class SSIM_Multiscale(tf.keras.metrics.Metric):
-
-  def __init__(self, name='ssim_ms', **kwargs):
-    super(SSIM_Multiscale, self).__init__(name=name, **kwargs)
-    self.ssim_ms = self.add_weight(name='ssim_ms', initializer='zeros')
-    self.self_ssim_ms = self.add_weight(name='self_ssim_ms', initializer='zeros')
-    self.ep = 0.0000001
-
-  def update_state(self, y_true, y_pred, sample_weight=None):
-    values = tf.math.reduce_mean(tf.image.ssim_multiscale(y_true, y_pred, 1.0, filter_size=4))
-
-    values = tf.cast(values, self.dtype)
-    if sample_weight is not None:
-        sample_weight = tf.cast(sample_weight, self.dtype)
-        sample_weight = tf.broadcast_to(sample_weight, values.shape)
-        values = tf.multiply(values, sample_weight)
-    self.ssim_ms.assign(values)
-#     self.self_ssim_ms.assign(same)
-
-  def result(self):
-    return self.ssim_ms
-
-class TOP_SSIM_Multiscale(tf.keras.metrics.Metric):
-
-  def __init__(self, name='self_ssim_ms', **kwargs):
-    super(TOP_SSIM_Multiscale, self).__init__(name=name, **kwargs)
-    self.self_ssim_ms = self.add_weight(name='self_ssim_ms', initializer='zeros')
-
-  def update_state(self, y_true, y_pred, sample_weight=None):
-    values = tf.math.reduce_mean(tf.image.ssim_multiscale(y_true, y_pred, 1.0, filter_size=3))
-
-    values = tf.cast(values, self.dtype)
-    if sample_weight is not None:
-        sample_weight = tf.cast(sample_weight, self.dtype)
-        sample_weight = tf.broadcast_to(sample_weight, values.shape)
-        values = tf.multiply(values, sample_weight)
-    self.self_ssim_ms.assign(values)
-
-  def result(self):
-    return self.self_ssim_ms
+        # reset
+        self.n_acum_step.assign(0)
+        for i in range(len(self.gradient_accumulation)):
+            self.gradient_accumulation[i].assign(tf.zeros_like(
+                self.autoencoder.trainable_variables[i], dtype=tf.float32))
